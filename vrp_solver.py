@@ -1,117 +1,125 @@
 import numpy as np
+import math
+import requests
+import streamlit as st
 
-def haversine(lat1, lon1, lat2, lon2):
-    """Calculate the great-circle distance between two points on the earth."""
-    # Convert decimal degrees to radians
-    lon1, lat1, lon2, lat2 = map(np.radians, [lon1, lat1, lon2, lat2])
-
-    # Haversine formula
-    dlon = lon2 - lon1
+def haversine_distance(coord1, coord2):
+    """Calculate Haversine distance (km) between two (lat, lon) coordinates."""
+    lat1, lon1 = map(math.radians, coord1)
+    lat2, lon2 = map(math.radians, coord2)
     dlat = lat2 - lat1
-    a = np.sin(dlat/2)**2 + np.cos(lat1) * np.cos(lat2) * np.sin(dlon/2)**2
-    c = 2 * np.arcsin(np.sqrt(a))
-    r = 6371 # Radius of earth in kilometers. Use 3956 for miles
-    return c * r
+    dlon = lon2 - lon1
+    a = math.sin(dlat/2)**2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon/2)**2
+    c = 2 * math.asin(math.sqrt(a))
+    R = 6371  # Earth radius in km
+    return c * R
 
-def calculate_savings(depot_coords, customer_coords):
-    """Calculate savings for merging routes for all customer pairs."""
-    num_customers = len(customer_coords)
-    savings = []
-    # Calculate distance matrix including depot (index 0)
-    all_coords = [depot_coords] + customer_coords
-    dist_matrix = np.zeros((num_customers + 1, num_customers + 1))
-    for i in range(num_customers + 1):
-        for j in range(i, num_customers + 1):
-            dist = haversine(all_coords[i][0], all_coords[i][1], all_coords[j][0], all_coords[j][1])
-            dist_matrix[i, j] = dist
-            dist_matrix[j, i] = dist
+@st.cache_data
+def get_osrm_distance(start_coord, end_coord):
+    """Fetch road-based distance (km) from OSRM API."""
+    if not (-90 <= start_coord[0] <= 90 and -180 <= start_coord[1] <= 180 and
+            -90 <= end_coord[0] <= 90 and -180 <= end_coord[1] <= 180):
+        st.warning(f"Invalid coordinates for distance: {start_coord} to {end_coord}")
+        print(f"Invalid coordinates: {start_coord} to {end_coord}")
+        return haversine_distance(start_coord, end_coord)  # Fallback
 
-    # Calculate savings S(i, j) = d(depot, i) + d(depot, j) - d(i, j)
-    for i in range(1, num_customers + 1):
-        for j in range(i + 1, num_customers + 1):
-            saving = dist_matrix[0, i] + dist_matrix[0, j] - dist_matrix[i, j]
-            savings.append(((i, j), saving))
+    url = f"http://router.project-osrm.org/route/v1/driving/{start_coord[1]},{start_coord[0]};{end_coord[1]},{end_coord[0]}?overview=false"
+    try:
+        response = requests.get(url, timeout=5)
+        response.raise_for_status()
+        data = response.json()
+        if data.get("routes"):
+            distance = data["routes"][0]["distance"] / 1000  # Convert meters to km
+            print(f"OSRM distance from {start_coord} to {end_coord}: {distance:.2f} km")
+            return distance
+        else:
+            print(f"OSRM no route found for {start_coord} to {end_coord}: {data.get('message', 'No message')}")
+            st.warning(f"No road route found for {start_coord} to {end_coord}. Using straight-line distance.")
+            return haversine_distance(start_coord, end_coord)  # Fallback
+    except requests.RequestException as e:
+        print(f"OSRM API error for {start_coord} to {end_coord}: {e}")
+        st.warning(f"OSRM API failed for {start_coord} to {end_coord}. Using straight-line distance.")
+        return haversine_distance(start_coord, end_coord)  # Fallback
 
-    # Sort savings in descending order
-    savings.sort(key=lambda x: x[1], reverse=True)
-    return savings, dist_matrix
+def create_distance_matrix(depot_coords, customer_coords):
+    """Create distance matrix using OSRM road-based distances."""
+    n = len(customer_coords) + 1  # Include depot
+    dist_matrix = np.zeros((n, n))
+    
+    # Depot to customers (index 0 is depot)
+    for i in range(1, n):
+        dist_matrix[0, i] = dist_matrix[i, 0] = get_osrm_distance(depot_coords, customer_coords[i-1])
+    
+    # Customer to customer
+    for i in range(1, n):
+        for j in range(i + 1, n):
+            dist_matrix[i, j] = dist_matrix[j, i] = get_osrm_distance(customer_coords[i-1], customer_coords[j-1])
+    
+    return dist_matrix
 
-def clarke_wright(depot_coords, customer_coords, customer_demands, vehicle_capacity, num_vehicles=None):
-    """Solves the VRP using the Clarke-Wright savings algorithm with capacity constraints.
-
-    Args:
-        depot_coords (tuple): (latitude, longitude) of the depot.
-        customer_coords (list): List of (latitude, longitude) tuples for customers.
-        customer_demands (list): List of demand values for each customer.
-        vehicle_capacity (float): Maximum capacity per vehicle.
-        num_vehicles (int, optional): Maximum number of routes (vehicles). Defaults to None (unlimited).
-
-    Returns:
-        list: A list of routes, where each route is a list of customer indices (starting from 1).
-        numpy.ndarray: The distance matrix.
-        list: Current load for each route.
-    """
-    num_customers = len(customer_coords)
-    if num_customers == 0:
+def clarke_wright(depot_coords, customer_coords, customer_demands, vehicle_capacity, num_vehicles):
+    """Clarke-Wright savings algorithm with road-based distances."""
+    n_customers = len(customer_coords)
+    if n_customers == 0:
         return [], np.zeros((1, 1)), []
 
-    savings, dist_matrix = calculate_savings(depot_coords, customer_coords)
-
-    # Initial routes: Depot -> Customer i -> Depot for all i
-    routes = [[i] for i in range(1, num_customers + 1)]
-    # Track route loads
+    # Create distance matrix
+    dist_matrix = create_distance_matrix(depot_coords, customer_coords)
+    
+    # Initialize routes: each customer has a direct route to/from depot
+    routes = [[i + 1] for i in range(n_customers)]  # 1-based indexing for customers
     route_loads = customer_demands.copy()
-
-    # Route Merging
-    for (i, j), saving in savings:
-        # Find routes containing customers i and j
-        route_i_idx, route_j_idx = -1, -1
-        for idx, route in enumerate(routes):
-            if i in route:
-                route_i_idx = idx
-            if j in route:
-                route_j_idx = idx
-            if route_i_idx != -1 and route_j_idx != -1:
-                break
-
-        # Check if i and j are in different routes
-        if route_i_idx != route_j_idx:
-            route_i = routes[route_i_idx]
-            route_j = routes[route_j_idx]
-
-            # Check capacity constraint
-            new_load = route_loads[route_i_idx] + route_loads[route_j_idx]
-            if new_load > vehicle_capacity:
-                continue
-
-            # Check merge conditions
-            can_merge_ij = (route_i[-1] == i and route_j[0] == j)
-            can_merge_ji = (route_j[-1] == j and route_i[0] == i)
-
-            merged = False
-            if can_merge_ij:
-                new_route = route_i + route_j
-                routes[route_i_idx] = new_route
-                routes.pop(route_j_idx)
-                route_loads[route_i_idx] = new_load
-                route_loads.pop(route_j_idx)
-                merged = True
-            elif can_merge_ji:
-                new_route = route_j + route_i
-                if route_i_idx > route_j_idx:
-                    routes[route_j_idx] = new_route
-                    routes.pop(route_i_idx)
-                    route_loads[route_j_idx] = new_load
-                    route_loads.pop(route_i_idx)
-                else:
-                    routes[route_i_idx] = new_route
-                    routes.pop(route_j_idx)
-                    route_loads[route_i_idx] = new_load
-                    route_loads.pop(route_j_idx)
-                merged = True
-
-            # Check vehicle limit
-            if merged and num_vehicles is not None and len(routes) == num_vehicles:
-                break
-
+    
+    # Calculate savings: s(i,j) = d(0,i) + d(0,j) - d(i,j)
+    savings = []
+    for i in range(1, n_customers + 1):
+        for j in range(i + 1, n_customers + 1):
+            s = dist_matrix[0, i] + dist_matrix[0, j] - dist_matrix[i, j]
+            savings.append((s, i, j))
+    savings.sort(reverse=True)  # Sort by descending savings
+    
+    # Merge routes based on savings
+    used_vehicles = len(routes)
+    for s, i, j in savings:
+        if used_vehicles >= num_vehicles:
+            break
+        
+        # Find routes containing i and j
+        route_i = route_j = None
+        for r in routes:
+            if i in r:
+                route_i = r
+            if j in r:
+                route_j = r
+        
+        if route_i is None or route_j is None or route_i == route_j:
+            continue
+        
+        # Check if i and j are at route ends
+        if not (route_i[0] == i or route_i[-1] == i) or not (route_j[0] == j or route_j[-1] == j):
+            continue
+        
+        # Check capacity constraint
+        load_i = sum(customer_demands[k-1] for k in route_i)
+        load_j = sum(customer_demands[k-1] for k in route_j)
+        if load_i + load_j > vehicle_capacity:
+            continue
+        
+        # Merge routes
+        if route_i[-1] == i and route_j[0] == j:
+            new_route = route_i + route_j
+        elif route_i[0] == i and route_j[-1] == j:
+            new_route = route_j + route_i
+        elif route_i[-1] == i and route_j[-1] == j:
+            new_route = route_i + route_j[::-1]
+        else:  # route_i[0] == i and route_j[0] == j
+            new_route = route_j[::-1] + route_i
+        
+        # Update routes and loads
+        routes.remove(route_i)
+        routes.remove(route_j)
+        routes.append(new_route)
+        route_loads[routes.index(new_route)] = load_i + load_j
+        used_vehicles = len(routes)
+    
     return routes, dist_matrix, route_loads
