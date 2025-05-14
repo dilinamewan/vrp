@@ -66,9 +66,9 @@ def clarke_wright(depot_coords, customer_coords, customer_demands, vehicle_capac
     # Create distance matrix
     dist_matrix = create_distance_matrix(depot_coords, customer_coords)
     
-    # Initialize routes: each customer has a direct route to/from depot
+    # Initialize routes: each customer in their own route
     routes = [[i + 1] for i in range(n_customers)]  # 1-based indexing for customers
-    route_loads = customer_demands.copy()
+    route_loads = [customer_demands[i] for i in range(n_customers)]
     
     # Calculate savings: s(i,j) = d(0,i) + d(0,j) - d(i,j)
     savings = []
@@ -76,50 +76,112 @@ def clarke_wright(depot_coords, customer_coords, customer_demands, vehicle_capac
         for j in range(i + 1, n_customers + 1):
             s = dist_matrix[0, i] + dist_matrix[0, j] - dist_matrix[i, j]
             savings.append((s, i, j))
-    savings.sort(reverse=True)  # Sort by descending savings
+    
+    # Sort by descending savings
+    savings.sort(reverse=True)
+    
+    # Track which route each customer belongs to
+    customer_route = {}
+    for i in range(n_customers):
+        customer_route[i + 1] = i  # Customer i+1 is in route i
     
     # Merge routes based on savings
-    used_vehicles = len(routes)
     for s, i, j in savings:
-        if used_vehicles >= num_vehicles:
-            break
-        
-        # Find routes containing i and j
-        route_i = route_j = None
-        for r in routes:
-            if i in r:
-                route_i = r
-            if j in r:
-                route_j = r
-        
-        if route_i is None or route_j is None or route_i == route_j:
+        # Skip if savings are negative
+        if s <= 0:
             continue
+            
+        # Find routes containing i and j
+        route_i_idx = customer_route.get(i)
+        route_j_idx = customer_route.get(j)
         
-        # Check if i and j are at route ends
-        if not (route_i[0] == i or route_i[-1] == i) or not (route_j[0] == j or route_j[-1] == j):
+        # Skip if customers are already in the same route or not found
+        if route_i_idx is None or route_j_idx is None or route_i_idx == route_j_idx:
+            continue
+            
+        route_i = routes[route_i_idx]
+        route_j = routes[route_j_idx]
+        
+        # Check if i and j are at the ends of their respective routes
+        i_at_start = route_i[0] == i
+        i_at_end = route_i[-1] == i
+        j_at_start = route_j[0] == j
+        j_at_end = route_j[-1] == j
+        
+        # Skip if neither customer is at an end of their route
+        if not ((i_at_start or i_at_end) and (j_at_start or j_at_end)):
             continue
         
         # Check capacity constraint
-        load_i = sum(customer_demands[k-1] for k in route_i)
-        load_j = sum(customer_demands[k-1] for k in route_j)
-        if load_i + load_j > vehicle_capacity:
+        combined_load = route_loads[route_i_idx] + route_loads[route_j_idx]
+        if combined_load > vehicle_capacity:
             continue
         
-        # Merge routes
-        if route_i[-1] == i and route_j[0] == j:
+        # Merge routes properly based on positions
+        new_route = []
+        if i_at_end and j_at_start:
             new_route = route_i + route_j
-        elif route_i[0] == i and route_j[-1] == j:
+        elif i_at_start and j_at_end:
             new_route = route_j + route_i
-        elif route_i[-1] == i and route_j[-1] == j:
-            new_route = route_i + route_j[::-1]
-        else:  # route_i[0] == i and route_j[0] == j
-            new_route = route_j[::-1] + route_i
+        elif i_at_end and j_at_end:
+            new_route = route_i + list(reversed(route_j))
+        elif i_at_start and j_at_start:
+            new_route = list(reversed(route_i)) + route_j
+        else:
+            continue  # This shouldn't happen with our checks above
         
         # Update routes and loads
-        routes.remove(route_i)
-        routes.remove(route_j)
-        routes.append(new_route)
-        route_loads[routes.index(new_route)] = load_i + load_j
-        used_vehicles = len(routes)
+        routes[route_i_idx] = new_route
+        route_loads[route_i_idx] = combined_load
+        
+        # Mark route_j as empty (we'll remove it later)
+        routes[route_j_idx] = []
+        route_loads[route_j_idx] = 0
+        
+        # Update customer_route mapping for all customers in the merged route
+        for cust in new_route:
+            customer_route[cust] = route_i_idx
     
-    return routes, dist_matrix, route_loads
+    # Remove empty routes
+    non_empty_routes = []
+    non_empty_loads = []
+    for i, route in enumerate(routes):
+        if route:
+            non_empty_routes.append(route)
+            non_empty_loads.append(route_loads[i])
+    
+    # If we have more vehicles than required routes, it's fine
+    # But if we have more routes than vehicles, we need to merge some
+    while len(non_empty_routes) > num_vehicles:
+        # Find the two smallest routes to merge
+        min_load_idx1 = min_load_idx2 = -1
+        min_load1 = min_load2 = float('inf')
+        
+        for i, load in enumerate(non_empty_loads):
+            if load < min_load1:
+                min_load2 = min_load1
+                min_load_idx2 = min_load_idx1
+                min_load1 = load
+                min_load_idx1 = i
+            elif load < min_load2:
+                min_load2 = load
+                min_load_idx2 = i
+        
+        # Merge these two routes if possible
+        if min_load_idx1 >= 0 and min_load_idx2 >= 0:
+            combined_load = non_empty_loads[min_load_idx1] + non_empty_loads[min_load_idx2]
+            if combined_load <= vehicle_capacity:
+                # Merge them
+                non_empty_routes[min_load_idx1].extend(non_empty_routes[min_load_idx2])
+                non_empty_loads[min_load_idx1] = combined_load
+                
+                # Remove the second route
+                non_empty_routes.pop(min_load_idx2)
+                non_empty_loads.pop(min_load_idx2)
+            else:
+                # If we can't merge the smallest routes, we can't reduce further
+                break
+        else:
+            break
+    
+    return non_empty_routes, dist_matrix, non_empty_loads

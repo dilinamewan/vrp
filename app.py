@@ -18,7 +18,7 @@ st.set_page_config(
 st.title("Vehicle Routing Problem Solver")
 st.markdown("""
 This application solves the Capacitated Vehicle Routing Problem (CVRP) using the Clarke-Wright savings algorithm.
-In manual mode, enter location names (e.g., 'Colombo, Sri Lanka') for the depot and customers. In random mode, customers are generated within a specified radius around the depot.
+Enter location names (e.g., 'Colombo, Sri Lanka') for the depot and customers. In random mode, customers are generated within a specified radius around the depot.
 Routes are displayed on the map following actual roads, using Sri Lanka locations.
 """)
 
@@ -88,8 +88,8 @@ with st.sidebar:
     # Depot location
     st.subheader("Depot Location")
     if input_method := st.radio("Choose input method", ["Random Generation", "Manual Input"]) == "Random Generation":
-        depot_lat = st.number_input("Depot Latitude", value=6.9271, format="%.4f", help="Example: Colombo, Sri Lanka")
-        depot_lon = st.number_input("Depot Longitude", value=79.8612, format="%.4f", help="Example: Colombo, Sri Lanka")
+        # Changed to use location name instead of coordinates
+        depot_location = st.text_input("Depot Location", value="Colombo, Sri Lanka", help="Example: Colombo, Sri Lanka")
     else:
         depot_location = st.text_input("Depot Location", value="Colombo, Sri Lanka", help="Example: Colombo, Sri Lanka")
 
@@ -146,15 +146,12 @@ with st.sidebar:
 # Main content area
 if solve_button:
     with st.spinner("Solving VRP..."):
-        # Get depot coordinates
-        if input_method == "Random Generation":
-            depot_coords = (depot_lat, depot_lon)
-        else:
-            depot_lat, depot_lon = geocode_location(depot_location)
-            if depot_lat is None or depot_lon is None:
-                st.error("Invalid depot location. Please enter a valid location name (e.g., 'Colombo, Sri Lanka').")
-                st.stop()
-            depot_coords = (depot_lat, depot_lon)
+        # Get depot coordinates - unified approach for both methods
+        depot_lat, depot_lon = geocode_location(depot_location)
+        if depot_lat is None or depot_lon is None:
+            st.error("Invalid depot location. Please enter a valid location name (e.g., 'Colombo, Sri Lanka').")
+            st.stop()
+        depot_coords = (depot_lat, depot_lon)
         
         # Get customer coordinates and demands
         if input_method == "Random Generation":
